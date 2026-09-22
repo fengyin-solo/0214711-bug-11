@@ -126,6 +126,8 @@ import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import { authState, logout } from '../utils/auth'
 import { logger } from '../utils/api'
+import { bookingStore } from '../utils/bookingStore'
+import { taskStore } from '../utils/taskStore'
 
 export default {
   name: 'Profile',
@@ -148,12 +150,8 @@ export default {
       toastTitle: '',
       toastMessage: '',
       editForm: { name: '', phone: '', email: '' },
-      statusText: { completed: '已完成', upcoming: '待使用', cancelled: '已取消' },
-      recentBookings: [
-        { id: 1, orderNo: 'BK20260001', tableName: '3号球桌 - 美式九球', date: '2026-02-15', time: '14:00 - 16:00', status: 'upcoming' },
-        { id: 2, orderNo: 'BK20260002', tableName: '1号球桌 - 斯诺克', date: '2026-02-10', time: '19:00 - 21:00', status: 'completed' },
-        { id: 3, orderNo: 'BK20260003', tableName: '5号球桌 - 中式八球', date: '2026-02-08', time: '10:00 - 12:00', status: 'completed' }
-      ],
+      statusText: { completed: '已完成', upcoming: '待使用', pending_payment: '待付款', ongoing: '进行中', cancelled: '已取消' },
+      bookingVersion: 0,
       quickActions: [
         { id: 1, name: '任务中心', icon: '📋', action: 'tasks' },
         { id: 2, name: '优惠券', icon: '🎫', action: 'coupon' },
@@ -178,6 +176,21 @@ export default {
   computed: {
     user() {
       return authState.user || { id: '', name: '游客', level: '普通', points: 0, totalHours: 0, competitions: 0, wins: 0, courses: 0 }
+    },
+    recentBookings() {
+      // 依赖预约库的同一份记录，与球桌页/任务中心保持一致
+      this.bookingVersion
+      return bookingStore
+        .getBookings()
+        .slice(0, 5)
+        .map(b => ({
+          id: b.orderNo,
+          orderNo: b.orderNo,
+          tableName: `${b.tableName} - ${b.tableType}`,
+          date: b.date,
+          time: b.time,
+          status: b.status === 'pending_payment' ? 'upcoming' : b.status
+        }))
     }
   },
   mounted() {
@@ -186,6 +199,12 @@ export default {
       phone: this.user.phone || '',
       email: this.user.email || ''
     }
+    this.unsubscribeBookings = bookingStore.subscribe(() => {
+      this.bookingVersion++
+    })
+  },
+  beforeUnmount() {
+    if (this.unsubscribeBookings) this.unsubscribeBookings()
   },
   methods: {
     getDay(date) { return new Date(date).getDate() },
@@ -195,13 +214,14 @@ export default {
       if (nav === 'info') {
         this.showEditModal = true
       } else if (nav === 'bookings') {
-        this.showNotification('info', '我的预约', `您有 ${this.recentBookings.filter(b => b.status === 'upcoming').length} 个待使用的预约`)
+        const upcomingCount = this.recentBookings.filter(b => b.status === 'upcoming').length
+        this.showNotification('info', '我的预约', `您有 ${upcomingCount} 个待使用的预约`)
       } else if (nav === 'tasks') {
         this.$router.push('/tasks')
       }
     },
     viewAllBookings() {
-      this.showNotification('info', '全部预约', `共 ${this.recentBookings.length} 条预约记录`)
+      this.$router.push('/tasks')
     },
     async saveProfile() {
       // 表单验证
@@ -230,10 +250,16 @@ export default {
     viewBookingDetail(booking) { this.selectedBooking = booking; this.showBookingDetailModal = true },
     handleBookingAction() {
       if (this.selectedBooking?.status === 'upcoming') {
+        const orderNo = this.selectedBooking.orderNo
+        // 与任务中心取消走同一条链路：记录保留 + 释放球桌时段
+        bookingStore.cancelBooking(orderNo)
+        const linkedTask = taskStore.getAll().find(t => t.type === 'booking' && t.extra?.orderNo === orderNo)
+        if (linkedTask) taskStore.cancelTask(linkedTask.id)
         this.selectedBooking.status = 'cancelled'
+        this.bookingVersion++
         this.showBookingDetailModal = false
-        this.showNotification('success', '取消成功', '预约已取消')
-        logger.info('Booking cancelled', { orderNo: this.selectedBooking.orderNo })
+        this.showNotification('success', '取消成功', '预约已取消，时段已释放')
+        logger.info('Booking cancelled', { orderNo })
       } else { this.showBookingDetailModal = false }
     },
     handleAction(action) {

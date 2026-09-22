@@ -243,6 +243,7 @@ import Toast from '../components/Toast.vue'
 import { logger } from '../utils/api'
 import { authState } from '../utils/auth'
 import { taskStore } from '../utils/taskStore'
+import { bookingStore } from '../utils/bookingStore'
 
 export default {
   name: 'Tasks',
@@ -351,6 +352,8 @@ export default {
       if (task.extra) {
         if (task.type === 'booking' && task.extra.tableId) {
           query.tableId = task.extra.tableId
+          // 再次预约时带上原日期，球桌页据此加载同一天的数据
+          if (task.extra.date) query.date = task.extra.date
         }
         if (task.type === 'course' && task.extra.courseId) {
           query.courseId = task.extra.courseId
@@ -398,18 +401,32 @@ export default {
     async confirmCancel() {
       if (!this.selectedTask) return
       this.cancelLoading = true
-      
+
       await new Promise(resolve => setTimeout(resolve, 800))
-      
-      const result = taskStore.remove(this.selectedTask.id)
-      
+
+      const taskId = this.selectedTask.id
+      const orderNo = this.selectedTask.extra?.orderNo
+
+      // 预约类：在预约库中将记录置为 cancelled 并释放球桌时段，
+      // 任务中心同步状态且保留取消记录；其他类型沿用删除语义。
+      let result
+      if (this.selectedTask.type === 'booking') {
+        const booking = orderNo ? bookingStore.cancelBooking(orderNo) : null
+        result = taskStore.cancelTask(taskId)
+        if (!booking) {
+          logger.warn('关联的预约记录不存在', { taskId, orderNo })
+        }
+      } else {
+        result = taskStore.remove(taskId)
+      }
+
       this.cancelLoading = false
       this.showCancelModal = false
-      
+
       if (result) {
         this.refreshTasks()
-        this.showNotification('success', '取消成功', '任务已取消')
-        logger.info('Task cancelled', { taskId: this.selectedTask.id })
+        this.showNotification('success', '取消成功', '记录已保留，可在已完成列表中查看')
+        logger.info('Task cancelled', { taskId, orderNo })
       } else {
         this.showNotification('error', '取消失败', '请稍后重试')
       }
@@ -642,6 +659,11 @@ export default {
   opacity: 0.9;
 }
 
+.task-card.danger {
+  border-left: 4px solid #ff6b6b;
+  opacity: 0.9;
+}
+
 .task-header {
   display: flex;
   justify-content: space-between;
@@ -689,6 +711,11 @@ export default {
 .task-status.success {
   background: rgba(108, 117, 125, 0.15);
   color: #6c757d;
+}
+
+.task-status.danger {
+  background: rgba(255, 107, 107, 0.15);
+  color: #ff6b6b;
 }
 
 .task-body {
@@ -888,6 +915,11 @@ export default {
 .detail-status.success {
   background: rgba(108, 117, 125, 0.15);
   color: #6c757d;
+}
+
+.detail-status.danger {
+  background: rgba(255, 107, 107, 0.15);
+  color: #ff6b6b;
 }
 
 .detail-list {

@@ -29,6 +29,10 @@ const taskTypeConfig = {
       completed: [
         { key: 'view', label: '查看结果', type: 'default' },
         { key: 'rebook', label: '再次预约', type: 'primary', route: '/tables' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看详情', type: 'default' },
+        { key: 'rebook', label: '再次预约', type: 'primary', route: '/tables' }
       ]
     }
   },
@@ -49,6 +53,9 @@ const taskTypeConfig = {
       completed: [
         { key: 'view', label: '查看结果', type: 'default' },
         { key: 'review', label: '评价', type: 'primary' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看详情', type: 'default' }
       ]
     }
   },
@@ -68,6 +75,9 @@ const taskTypeConfig = {
       ],
       completed: [
         { key: 'view', label: '查看结果', type: 'default', route: '/competitions' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看详情', type: 'default', route: '/competitions' }
       ]
     }
   },
@@ -91,6 +101,10 @@ const taskTypeConfig = {
         { key: 'view', label: '查看结果', type: 'default', route: '/shop' },
         { key: 'review', label: '评价', type: 'primary' },
         { key: 'rebuy', label: '再次购买', type: 'default', route: '/shop' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看详情', type: 'default', route: '/shop' },
+        { key: 'rebuy', label: '再次购买', type: 'primary', route: '/shop' }
       ]
     }
   }
@@ -103,7 +117,7 @@ const statusConfig = {
   pending_shipment: { text: '待发货', type: 'warning' },
   shipped: { text: '已发货', type: 'info' },
   completed: { text: '已完成', type: 'success' },
-  cancelled: { text: '已取消', type: 'success' }
+  cancelled: { text: '已取消', type: 'danger' }
 }
 
 function loadTasks() {
@@ -210,7 +224,8 @@ export const taskStore = {
       return tasks.filter(t => t.status !== 'completed' && t.status !== 'cancelled')
     }
     if (status === 'completed') {
-      return tasks.filter(t => t.status === 'completed')
+      // 已取消记录归档在「已完成」页签下保留，不再物理删除
+      return tasks.filter(t => t.status === 'completed' || t.status === 'cancelled')
     }
     return tasks
   },
@@ -268,19 +283,23 @@ export const taskStore = {
     return true
   },
 
-  addBookingTask(table, bookingInfo) {
+  addBookingTask(booking) {
+    // 直接以预约记录为唯一数据源落库，避免再从页面可变状态拼装，
+    // 保证任务中心与预约成功结果使用同一份快照。
     return this.add({
       type: 'booking',
-      title: `${table.name} - ${table.type}`,
-      subtitle: `${bookingInfo.date} ${bookingInfo.time}`,
-      amount: table.price * bookingInfo.duration,
-      status: 'pending_payment',
+      title: `${booking.tableName} - ${booking.tableType}`,
+      subtitle: `${booking.date} ${booking.time}`,
+      amount: booking.amount,
+      status: booking.status || 'pending_payment',
       extra: {
-        tableId: table.id,
-        date: bookingInfo.date,
-        time: bookingInfo.time,
-        duration: bookingInfo.duration,
-        orderNo: bookingInfo.orderNo
+        orderNo: booking.orderNo,
+        tableId: booking.tableId,
+        date: booking.date,
+        slotId: booking.slotId,
+        time: booking.time,
+        duration: booking.duration,
+        price: booking.price
       }
     })
   },
@@ -335,20 +354,43 @@ export const taskStore = {
   markAsPaid(taskId) {
     const task = this.getById(taskId)
     if (!task) return null
-    
+
     let newStatus = 'upcoming'
     let newSubtitle = '支付成功'
-    
+
     if (task.type === 'order') {
       newStatus = 'pending_shipment'
       newSubtitle = '支付成功，待发货'
     } else if (task.type === 'course') {
       newSubtitle = '支付成功，等待开课'
     } else if (task.type === 'booking') {
-      newSubtitle = '支付成功，等待使用'
+      // 保留预约的日期时段信息，避免支付后副标题与原预约脱节
+      newSubtitle = task.extra?.date && task.extra?.time
+        ? `${task.extra.date} ${task.extra.time}`
+        : '支付成功，等待使用'
     }
-    
+
     return this.update(taskId, { status: newStatus, subtitle: newSubtitle })
+  },
+
+  /**
+   * 取消任务：对预约类记录置为 cancelled 并保留记录；
+   * 其他类型沿用原有的物理删除语义。
+   */
+  cancelTask(taskId) {
+    const task = this.getById(taskId)
+    if (!task) {
+      logger.warn('任务不存在，无法取消', taskId)
+      return null
+    }
+    const result = this.update(taskId, {
+      status: 'cancelled',
+      subtitle: task.type === 'booking' && task.extra?.date && task.extra?.time
+        ? `${task.extra.date} ${task.extra.time}（已取消）`
+        : '已取消'
+    })
+    logger.info('任务已取消', taskId)
+    return result
   },
 
   getPendingCount() {
