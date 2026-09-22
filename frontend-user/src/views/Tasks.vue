@@ -140,6 +140,8 @@
       size="small"
       confirm-text="确认支付"
       :loading="payLoading"
+      :confirm-disabled="payLoading"
+      :close-on-overlay="!payLoading"
       @confirm="confirmPay"
     >
       <div class="pay-info">
@@ -172,6 +174,8 @@
       confirm-text="确认取消"
       confirm-type="danger"
       :loading="cancelLoading"
+      :confirm-disabled="cancelLoading"
+      :close-on-overlay="!cancelLoading"
       @confirm="confirmCancel"
     />
 
@@ -324,8 +328,10 @@ export default {
       this.activeTab = tab
     },
     handleAction(task, action) {
+      // 任何弹窗操作进行中时，不再响应其他任务卡片的点击，防止 A 任务操作写到 B 任务
+      if (this.payLoading || this.cancelLoading) return
       this.selectedTask = { ...task }
-      
+
       if (action.route) {
         this.navigateToRoute(action.route, action.key, task)
         return
@@ -349,8 +355,11 @@ export default {
       
       const query = {}
       if (task.extra) {
-        if (task.type === 'booking' && task.extra.tableId) {
+        if (task.type === 'booking' && task.extra.tableId != null) {
+          // 携带同一次预约的球桌/日期/时段回到球桌页，保证上下文不丢
           query.tableId = task.extra.tableId
+          if (task.extra.date) query.date = task.extra.date
+          if (task.extra.slotId != null) query.slotId = task.extra.slotId
         }
         if (task.type === 'course' && task.extra.courseId) {
           query.courseId = task.extra.courseId
@@ -375,41 +384,45 @@ export default {
       this.showDetailModal = true
     },
     async confirmPay() {
-      if (!this.selectedTask) return
+      if (!this.selectedTask || this.payLoading) return
+      // 操作目标在调用瞬间冻结，await 期间即使选中项变化也不会串到别的任务
+      const targetTask = { ...this.selectedTask }
       this.payLoading = true
-      
+
       await new Promise(resolve => setTimeout(resolve, 1000))
-      
-      const updatedTask = taskStore.markAsPaid(this.selectedTask.id)
-      
+
+      const updatedTask = taskStore.markAsPaid(targetTask.id)
+
       this.payLoading = false
       this.showPayModal = false
-      
+
       if (updatedTask) {
         this.refreshTasks()
         this.successTitle = '支付成功'
         this.successMessage = '您的订单已支付成功'
         this.showSuccessModal = true
-        logger.info('Payment successful', { taskId: this.selectedTask.id, amount: this.selectedTask.amount })
+        logger.info('Payment successful', { taskId: targetTask.id, amount: targetTask.amount })
       } else {
         this.showNotification('error', '支付失败', '请稍后重试')
       }
     },
     async confirmCancel() {
-      if (!this.selectedTask) return
+      if (!this.selectedTask || this.cancelLoading) return
+      // 同上：冻结本次取消的任务ID
+      const targetTask = { ...this.selectedTask }
       this.cancelLoading = true
-      
+
       await new Promise(resolve => setTimeout(resolve, 800))
-      
-      const result = taskStore.remove(this.selectedTask.id)
-      
+
+      const result = taskStore.remove(targetTask.id)
+
       this.cancelLoading = false
       this.showCancelModal = false
-      
+
       if (result) {
         this.refreshTasks()
         this.showNotification('success', '取消成功', '任务已取消')
-        logger.info('Task cancelled', { taskId: this.selectedTask.id })
+        logger.info('Task cancelled', { taskId: targetTask.id })
       } else {
         this.showNotification('error', '取消失败', '请稍后重试')
       }

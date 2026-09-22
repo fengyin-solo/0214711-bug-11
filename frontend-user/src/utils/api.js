@@ -115,9 +115,17 @@ export const logger = {
  * })
  */
 async function request(url, options = {}) {
-  const fullUrl = `${API_BASE_URL}${url}`
+  // GET 查询参数序列化（mock 模式下 options.params 原样传给 handler）
+  const params = options.params
+  let fullUrl = `${API_BASE_URL}${url}`
+  if (params && Object.keys(params).length > 0) {
+    const search = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
+    ).toString()
+    if (search) fullUrl += `?${search}`
+  }
   logger.info(`API Request: ${options.method || 'GET'} ${fullUrl}`)
-  
+
   try {
     // 模拟模式：使用前端模拟数据
     if (import.meta.env.VITE_USE_MOCK !== 'false') {
@@ -167,11 +175,12 @@ async function mockRequest(url, options) {
   // 模拟网络延迟 500-1000ms
   await delay(500 + Math.random() * 500)
   
-  // URL到处理函数的映射
+  // URL到处理函数的映射（精确路径）
   const mockHandlers = {
     '/auth/login': handleLogin,
     '/auth/logout': handleLogout,
-    '/tables': () => mockData.tables,
+    '/tables': handleGetTables,
+    '/tables/slots': handleGetTableSlots,
     '/courses': () => mockData.courses,
     '/competitions': () => mockData.competitions,
     '/products': () => mockData.products,
@@ -226,23 +235,190 @@ function handleLogout() {
   return { message: '退出成功' }
 }
 
+// ==================== 球桌可用性（确定性数据源） ====================
+
+/**
+ * 固定的营业时段定义。时段信息只应有一个来源，
+ * 避免页面写死一份、接口再返回一份造成错位。
+ */
+export const TABLE_TIME_SLOTS = [
+  { id: 1, time: '10:00 - 12:00' },
+  { id: 2, time: '12:00 - 14:00' },
+  { id: 3, time: '14:00 - 16:00' },
+  { id: 4, time: '16:00 - 18:00' },
+  { id: 5, time: '18:00 - 20:00' },
+  { id: 6, time: '20:00 - 22:00' }
+]
+
+/**
+ * 球桌基础元数据（id 与类型的稳定对应关系），
+ * 供页面在仅拿到 tableId（如任务中心“再次预约”跳转）时定位类型
+ */
+export const TABLE_META = [
+  { id: 1, typeId: 'snooker' },
+  { id: 2, typeId: 'snooker' },
+  { id: 3, typeId: 'pool' },
+  { id: 4, typeId: 'pool' },
+  { id: 5, typeId: 'chinese' },
+  { id: 6, typeId: 'chinese' }
+]
+
+/**
+ * 基于字符串的稳定哈希（同一入参永远得到同一结果），
+ * 用于模拟"不同球桌/日期可用状态不同"，但同一次查询结果可复现，
+ * 避免 Math.random() 导致同日期下列表与时段对不上。
+ */
+function stableHash(str) {
+  let h = 0
+  for (let i = 0; i < str.length; i++) {
+    h = (h * 31 + str.charCodeAt(i)) >>> 0
+  }
+  return h
+}
+
+/**
+ * 营业计划层面某球桌某日某时段是否开放（确定性，不含已下订单占用）
+ */
+function isSlotOpenBySchedule(tableId, date, slotId) {
+  // 约 25% 的（球桌×日期×时段）处于维护/满档
+  return stableHash(`${tableId}|${date}|${slotId}`) % 4 !== 0
+}
+
+/**
+ * 本地日期 YYYY-MM-DD（UTC 安全，避免 toISOString 的时区偏移）
+ */
+function localDateStr(d) {
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/**
+ * 获取某球桌某日的全部时段及可用状态
+ * 可用 = 营业计划开放 且 未被任务中心中的有效预约占用
+ * @param {Object} params - { tableId, date }
+ * @returns {Array<{id: number, time: string, available: boolean}>}
+ */
+function getTableSlotsForDate(params) {
+  const tableId = Number(params.tableId)
+  const date = String(params.date)
+  // 过去的日期一律不可约
+  if (date < localDateStr(new Date())) {
+    return TABLE_TIME_SLOTS.map(slot => ({ id: slot.id, time: slot.time, available: false }))
+  }
+  return TABLE_TIME_SLOTS.map(slot => ({
+    id: slot.id,
+    time: slot.time,
+    available:
+      isSlotOpenBySchedule(tableId, date, slot.id) &&
+      !taskStore.hasBookingConflict(tableId, date, slot.time)
+  }))
+}
+
+/**
+ * GET /tables?type=&date=
+ * 返回指定日期的球桌列表；available 由该日是否存在可预约时段决定（确定性）。
+ * 不传 date 时返回基础信息（available 取基础数据中的初始值）。
+ */
+function handleGetTables(options = {}) {
+  const params = options.params || {}
+  let list = mockData.tables
+  if (params.type && params.type !== 'all') {
+    list = list.filter(t => t.typeId === params.type)
+  }
+  if (params.date) {
+    list = list.map(table => {
+      const slots = getTableSlotsForDate({ tableId: table.id, date: params.date })
+      return { ...table, available: slots.some(s => s.available) }
+    })
+  }
+  return list
+}
+
+/**
+ * GET /tables/slots?tableId=&date=
+ * 返回指定球桌、指定日期的时段列表
+ */
+function handleGetTableSlots(options = {}) {
+  const params = options.params || {}
+  if (!params.tableId || !params.date) {
+    throw new Error('缺少球桌或日期参数')
+  }
+  return getTableSlotsForDate(params)
+}
+
 /**
  * 处理预约相关请求
- * GET: 返回预约列表
- * POST: 创建新预约
+ * GET: 返回当前用户的有效预约记录（与任务中心同一数据源）
+ * POST: 创建新预约（校验球桌/日期/时段是否仍可约，成功后写入任务中心）
  */
 function handleBookings(options) {
   if (options.method === 'POST') {
     const body = JSON.parse(options.body || '{}')
-    const orderNo = 'BK' + Date.now().toString().slice(-8)
-    logger.info('Mock booking created', { orderNo })
+    const { tableId, date, timeSlot, slotId, duration } = body
+
+    const table = mockData.tables.find(t => t.id === Number(tableId))
+    if (!table) {
+      throw new Error('球桌不存在，请刷新后重试')
+    }
+    if (!date || !timeSlot) {
+      throw new Error('预约日期或时段缺失')
+    }
+    if (date < localDateStr(new Date())) {
+      throw new Error('不能预约过去的日期')
+    }
+    if (!duration || duration <= 0) {
+      throw new Error('预约时长无效')
+    }
+
+    // 时段必须属于当前球桌+日期的返回结果，防止前端拿着过期时段下单
+    const slots = getTableSlotsForDate({ tableId: table.id, date })
+    const slot = slots.find(s =>
+      slotId != null ? s.id === Number(slotId) : s.time === timeSlot
+    )
+    if (!slot) {
+      throw new Error('该时段不存在，请重新选择')
+    }
+    if (!slot.available) {
+      throw new Error('该时段已被预约或暂不可用，请选择其他时段')
+    }
+
+    const orderNo = 'BK' + Date.now().toString().slice(-8) +
+      Math.floor(Math.random() * 100).toString().padStart(2, '0')
+    logger.info('Mock booking created', { orderNo, tableId, date, timeSlot })
+
+    // 唯一写入点：订单与任务来自同一次请求的同一份数据
+    taskStore.addBookingTask(table, {
+      orderNo,
+      date,
+      time: slot.time,
+      slotId: slot.id,
+      duration
+    })
+
+    // 价格以下单时球桌数据为准并随响应回传，保证弹窗/任务价格一致
     return {
       orderNo,
-      ...body,
-      status: 'upcoming'
+      tableId: table.id,
+      tableName: table.name,
+      type: table.type,
+      date,
+      time: slot.time,
+      slotId: slot.id,
+      duration,
+      price: table.price,
+      amount: table.price * duration,
+      status: 'pending_payment'
     }
   }
-  return mockData.bookings
+
+  return taskStore.getActiveBookings().map(t => ({
+    orderNo: t.extra?.orderNo || t.id,
+    tableId: t.extra?.tableId,
+    tableName: t.title,
+    date: t.extra?.date,
+    time: t.extra?.time,
+    status: t.status
+  }))
 }
 
 /**
@@ -388,6 +564,15 @@ export const api = {
    * @param {string} params.date - 查询日期
    */
   getTables: (params) => request('/tables', { params }),
+
+  /**
+   * 获取指定球桌在指定日期的可预约时段
+   * @param {Object} params - 查询参数
+   * @param {number} params.tableId - 球桌ID
+   * @param {string} params.date - 预约日期
+   * @returns {Promise<{success: boolean, data: Array<{id: number, time: string, available: boolean}>}>}
+   */
+  getTableSlots: (params) => request('/tables/slots', { params }),
   
   /**
    * 创建球桌预约

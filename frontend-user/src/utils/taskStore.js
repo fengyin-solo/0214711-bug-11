@@ -136,7 +136,7 @@ function getDefaultTasks() {
       amount: 120,
       status: 'pending_payment',
       createdAt: formatDate(new Date(Date.now() - 86400000)),
-      extra: { tableId: 3, date: '2026-02-15', time: '14:00 - 16:00' }
+      extra: { tableId: 3, tableName: '3号球桌', type: '美式九球', price: 60, date: '2026-02-15', time: '14:00 - 16:00', slotId: 3, duration: 2 }
     },
     {
       id: 'T' + Date.now().toString() + '002',
@@ -276,13 +276,44 @@ export const taskStore = {
       amount: table.price * bookingInfo.duration,
       status: 'pending_payment',
       extra: {
+        // 快照字段：任务一旦生成，其球桌/日期/时段/价格不再随页面状态变化
         tableId: table.id,
+        tableName: table.name,
+        type: table.type,
+        price: table.price,
         date: bookingInfo.date,
         time: bookingInfo.time,
+        slotId: bookingInfo.slotId,
         duration: bookingInfo.duration,
         orderNo: bookingInfo.orderNo
       }
     })
+  },
+
+  /**
+   * 获取所有仍生效的球桌预约（待付款/待开始/进行中）
+   * 已完成、已取消（记录被删除）的预约不再占用球桌时段
+   * @returns {Array} 预约任务列表
+   */
+  getActiveBookings() {
+    const activeStatus = ['pending_payment', 'upcoming', 'ongoing']
+    return loadTasks().filter(t => t.type === 'booking' && activeStatus.includes(t.status))
+  },
+
+  /**
+   * 判断指定球桌在某日某时段是否已被预约占用
+   * @param {number|string} tableId - 球桌ID
+   * @param {string} date - 预约日期 YYYY-MM-DD
+   * @param {string} time - 时段文本
+   * @returns {boolean} 是否已被占用
+   */
+  hasBookingConflict(tableId, date, time) {
+    return this.getActiveBookings().some(t =>
+      t.extra &&
+      String(t.extra.tableId) === String(tableId) &&
+      t.extra.date === date &&
+      t.extra.time === time
+    )
   },
 
   addCourseTask(course, enrollInfo) {

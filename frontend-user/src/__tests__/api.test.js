@@ -8,7 +8,7 @@
  * - 错误处理
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { api, logger } from '../utils/api'
 
 // ==================== API接口测试 ====================
@@ -93,19 +93,28 @@ describe('API Module', () => {
 
   describe('api.bookTable', () => {
     it('should create booking successfully', async () => {
-      const bookingData = {
+      const date = '2027-06-01'
+      const slotsRes = await api.getTableSlots({ tableId: 1, date })
+      const openSlot = slotsRes.data.find(s => s.available)
+
+      const result = await api.bookTable({
         tableId: 1,
-        date: '2026-03-01',
-        timeSlot: '14:00-16:00',
+        date,
+        timeSlot: openSlot.time,
+        slotId: openSlot.id,
         duration: 2
-      }
-      
-      const result = await api.bookTable(bookingData)
-      
+      })
+
       expect(result.success).toBe(true)
       expect(result.data.orderNo).toBeDefined()
       expect(result.data.orderNo).toMatch(/^BK\d+$/)
-      expect(result.data.status).toBe('upcoming')
+      expect(result.data.status).toBe('pending_payment')
+      // 同一次预约响应中球桌/日期/时段/价格必须齐全且对应
+      expect(result.data.tableId).toBe(1)
+      expect(result.data.date).toBe(date)
+      expect(result.data.time).toBe(openSlot.time)
+      expect(result.data.slotId).toBe(openSlot.id)
+      expect(result.data.amount).toBe(result.data.price * 2)
     })
   })
 
